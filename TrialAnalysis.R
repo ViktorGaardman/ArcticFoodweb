@@ -5,6 +5,7 @@ library(bipartite)
 library(patchwork)
 library(forcats)
 library(igraph)
+library(DHARMa)
 
 
 rm(list=ls())
@@ -12,6 +13,8 @@ rm(list=ls())
 options(contrasts = c("contr.sum", "contr.poly"))
 
 set.seed(123)
+
+#RRA
 
 ##1. Calculate relative abundance and relative biomass of flying prey
 
@@ -42,27 +45,26 @@ prey_sum <- prey_sum |>
   filter(!Order %in% c("Arenea", "Opiliones", "Coleoptera")) |> 
   filter(!Taxon %in% c("Microlepidoptera", "Lygaeidae"))
 
-#Split by month
+#Add weight data
+weight_df <- read.csv("Insect_dryweight.csv", sep = ";")
 
+mean_biomass <- weight_df |> 
+  group_by(Taxon) |> 
+  summarize(
+    mean_weight = mean(Weight.mg.)
+  ) |> 
+  select(Taxon, mean_weight) |> 
+  ungroup()
 
 #Read edgelist data
 
-#BEFORE THIS WORKS WE NEED TO FIX PTARMIGAN APPEARING TWICE
-#IN JUNE 2025 EDGELIST
-
 files <- list.files(
-  pattern = "^edgelist_.*_20.*_Fam\\.csv$"
+  pattern = "^edgelist_.*_20.*_Fam_RRA\\.csv$"
 )
 
 read_edgelist <- function(file) {
-  
-  if (grepl("june_2025", file)) {
-    read.csv(file, sep = ";")
-  } else {
-    read.csv(file, sep = ",")
-  }
+  read.csv(file, sep = ",")
 }
-
 
 edgelists <- files |>
   set_names(
@@ -71,7 +73,9 @@ edgelists <- files |>
       gsub("^edgelist_", "", x = _) |>
       tolower()
   ) |>
-  map(\(f) read_edgelist(f)[, 2:4])
+  map(\(f) read_edgelist(f)[, 2:6])
+
+#Calculate biomass and count per predator-prey interaction
 
 process_edgelist <- function(edgelist,
                              prey_sum,
@@ -96,9 +100,10 @@ process_edgelist <- function(edgelist,
   
   # Food web matrix
   web_matrix <- edgelist |>
+    select(Predator, Prey, MeanRRA) |> 
     pivot_wider(
       names_from = Predator,
-      values_from = InteractionStrength,
+      values_from = MeanRRA,
       values_fill = 0
     ) |>
     column_to_rownames("Prey") |>
@@ -136,7 +141,7 @@ process_edgelist <- function(edgelist,
     pivot_longer(
       -Predator,
       names_to = "Taxon",
-      values_to = "InteractionStrength"
+      values_to = "MeanRRA"
     )
   
   # Final output
@@ -173,18 +178,358 @@ combined_data <- purrr::imap(edgelists, function(edgelist, nm) {
   
 })
 
+#Look at abundnace and biomass against interaction strength
+
+
+combined_dates <- bind_rows(
+  combined_data,
+  .id = "Dataset"
+)
 
 
 
+df_july25_birds <- combined_dates |>
+  filter(Dataset == "july_2025_fam_rra") |> 
+  filter(Predator %in% c("Snow_bunting", "Lapland_bunting", "Wheatear"))
+
+df_july25_birds <- df_july25_birds |> 
+  filter(MeanRRA > 0)
+
+july_bio <- ggplot(df_july25_birds, aes(x = log10(Biomass + 0.01), y = MeanRRA)) +
+  geom_point() 
+#  scale_y_continuous(limits = c(0, 4)) +
+ # scale_x_continuous(limits = c(0,3))
+july_count <- ggplot(df_july25_birds, aes(x = log10(Count + 0.01), y = MeanRRA)) +
+  geom_point()
+#  scale_y_continuous(limits = c(0, 2)) +
+ # scale_x_continuous(limits = c(0,3))
+
+df_aug25_birds <- combined_dates |>
+  filter(Dataset == "august_2025_fam_rra") |> 
+  filter(Predator %in% c("Snow_bunting", "Lapland_bunting", "Wheatear"))
+
+df_aug25_birds <- df_aug25_birds |> 
+  filter(MeanRRA > 0)
+
+aug_bio <- ggplot(df_aug25_birds, aes(x = log10(Biomass + 0.01), y = MeanRRA)) +
+  geom_point() 
+  scale_y_continuous(limits = c(0, 4)) +
+  scale_x_continuous(limits = c(-1,3))
+
+aug_count <- ggplot(df_aug25_birds, aes(x = log10(Count + 0.01), y = MeanRRA)) +
+  geom_point()
+
+df_june25_birds <- combined_dates |>
+  filter(Dataset == "june_2025_fam_rra") |> 
+  filter(Predator %in% c("Snow_bunting", "Lapland_bunting", "Wheatear", "Ptarmigan"))
+
+df_june25_birds <- df_june25_birds |> 
+  filter(MeanRRA > 0)
+
+june_bio <- ggplot(df_june25_birds, aes(x = log10(Biomass + 0.01), y = MeanRRA)) +
+  geom_point()
+  scale_x_continuous(limits = c(-1,3))
+
+june_count <- ggplot(df_june25_birds, aes(x = log10(Count + 0.01), y = MeanRRA)) +
+  geom_point()
+
+combined_plots <- (june_bio | july_bio | aug_bio) / 
+  (june_count | july_count | aug_count)
+
+combined_plots
+
+
+#FOO
+
+#Read edgelist data
+
+files <- list.files(
+  pattern = "^edgelist_.*_20.*_Fam\\.csv$"
+)
+
+read_edgelist <- function(file) {
+  read.csv(file, sep = ",")
+}
+
+edgelists <- files |>
+  set_names(
+    basename(files) |>
+      gsub("\\.csv$", "", x = _) |>
+      gsub("^edgelist_", "", x = _) |>
+      tolower()
+  ) |>
+  map(\(f) read_edgelist(f)[, 2:6])
+
+#Calculate biomass and count per predator-prey interaction
+
+process_edgelist <- function(edgelist,
+                             prey_sum,
+                             mean_biomass,
+                             year,
+                             month) {
+  
+  # Prey matrix for the correct month/year
+  prey_matrix <- prey_sum |>
+    select(-Order) |>
+    filter(
+      Year == year,
+      Month == month
+    ) |>
+    select(-c(Year, Month)) |>
+    pivot_wider(
+      names_from = Taxon,
+      values_from = TotalCount,
+      values_fill = 0
+    ) |>
+    as.matrix()
+  
+  
+  shared_taxa <- intersect(
+    colnames(prey_matrix),
+    unique(edgelist$Prey)
+  )
+  
+  interactions_long <- edgelist |>
+    filter(Prey %in% shared_taxa) |>
+    select(
+      Predator,
+      Prey,
+      FOO,
+      TotalPresence,
+      N
+    ) |>
+    rename(Taxon = Prey)
+  
+  # Relative abundance
+  prey_clean <- as.data.frame(prey_matrix) |>
+    pivot_longer(
+      everything(),
+      names_to = "Taxon",
+      values_to = "Count"
+    ) |>
+    left_join(
+      mean_biomass,
+      by = "Taxon"
+    ) |>
+    mutate(
+      Biomass = Count * mean_weight
+    )
+  
+  # Final output
+  interactions_long |>
+    left_join(
+      prey_clean |>
+        select(
+          Taxon,
+          Count,
+          Biomass
+        ),
+      by = "Taxon"
+    ) |>
+    mutate(
+      Count = replace_na(Count, 0),
+      Biomass = replace_na(Biomass, 0)
+    )
+}
+
+combined_data_FOO <- purrr::imap(edgelists, function(edgelist, nm) {
+  
+  parts <- strsplit(nm, "_")[[1]]
+  
+  month <- tools::toTitleCase(parts[1])
+  year <- parts[2]
+  
+  process_edgelist(
+    edgelist,
+    prey_sum,
+    mean_biomass,
+    year,
+    month
+  )
+  
+})
+
+#Look at abundnace and biomass against interaction strength
+
+
+combined_dates_FOO <- bind_rows(
+  combined_data_FOO,
+  .id = "Dataset"
+)
+
+df_july25_birds <- combined_dates |>
+  filter(Dataset == "july_2025_fam") |> 
+  filter(Predator %in% c("Snow_bunting", "Lapland_bunting", "Wheatear"))
+
+df_july25_birds <- df_july25_birds |> 
+  filter(FOO > 0)
+
+july_bio <- ggplot(df_july25_birds, aes(x = log10(Biomass + 0.01), y = FOO)) +
+  geom_point() 
+#  scale_y_continuous(limits = c(0, 4)) +
+# scale_x_continuous(limits = c(0,3))
+july_count <- ggplot(df_july25_birds, aes(x = log10(Count + 0.01), y = FOO)) +
+  geom_point()
+#  scale_y_continuous(limits = c(0, 2)) +
+# scale_x_continuous(limits = c(0,3))
+
+df_aug25_birds <- combined_dates |>
+  filter(Dataset == "august_2025_fam") |> 
+  filter(Predator %in% c("Snow_bunting", "Lapland_bunting", "Wheatear"))
+
+df_aug25_birds <- df_aug25_birds |> 
+  filter(MeanRRA > 0)
+
+aug_bio <- ggplot(df_aug25_birds, aes(x = log10(Biomass + 0.01), y = FOO)) +
+  geom_point() 
+scale_y_continuous(limits = c(0, 4)) +
+  scale_x_continuous(limits = c(-1,3))
+
+aug_count <- ggplot(df_aug25_birds, aes(x = log10(Count + 0.01), y = FOO)) +
+  geom_point()
+
+df_june25_birds <- combined_dates |>
+  filter(Dataset == "june_2025_fam") |> 
+  filter(Predator %in% c("Snow_bunting", "Lapland_bunting", "Wheatear", "Ptarmigan"))
+
+df_june25_birds <- df_june25_birds |> 
+  filter(MeanRRA > 0)
+
+june_bio <- ggplot(df_june25_birds, aes(x = log10(Biomass + 0.01), y = FOO)) +
+  geom_point()
+scale_x_continuous(limits = c(-1,3))
+
+june_count <- ggplot(df_june25_birds, aes(x = log10(Count + 0.01), y = FOO)) +
+  geom_point()
+
+combined_plots <- (june_bio | july_bio | aug_bio) / 
+  (june_count | july_count | aug_count)
+
+combined_plots
+
+
+#COMBINE DATASETS
+
+#1. Exchange datasets for month and year columns
+
+FOO_clean <- combined_dates_FOO |>
+  mutate(
+    Month = str_extract(Dataset, "^[^_]+"),
+    Year  = str_extract(Dataset, "\\d{4}")
+  ) |> 
+  select(-Dataset)
+
+RRA_clean <- combined_dates |>
+  mutate(
+    Month = str_extract(Dataset, "^[^_]+"),
+    Year  = str_extract(Dataset, "\\d{4}")
+  ) |> 
+  select(-Dataset)
+
+#2. left join datasets
+
+df <- RRA_clean |>
+  left_join(
+    FOO_clean,
+    by = c("Predator", "Taxon", "Count", "Biomass", "Year", "Month")
+  )
+
+#3 group birds and spiders
+
+df <- df |> 
+  mutate(Group = case_when(
+    Predator %in% c("Lapland_bunting", "Snow_bunting",
+                    "Wheatear", "Redpoll", "Ptarmigan") ~ "Birds",
+    Predator %in% c("Lycosidae", "Araneidae",
+                    "Dictynidae", "Linyphiidae", "Phalangiidae",
+                    "Philodromidae", "Thomisidae") ~ "Spiders",
+    Predator %in% c("Dytiscidae", "Gyrinidae") ~ "Aquatic_predators",
+    Predator %in% "Chironomidae" ~ "Predatory_midges",
+    Predator %in% "Scathophagidae" ~ "Predatory_flies"
+  ))
+
+df <- df |> 
+  mutate(
+  Biomass_log = log(Biomass+0.001),
+  Count_log = log(Count + 0.1))
+
+#Drop all zero interactions
+#This gets problematic for the model though
+df_clean <- df |> 
+  filter(MeanRRA > 0)
+
+#4 fit the models RRA
+#Ziformula to handle zeros and ones
+#compare AIC with normal model to see if log model is better
+
+RRA_bio_mod <- glmmTMB::glmmTMB(MeanRRA ~ Biomass_log +
+                    Predator,
+                    ziformula = ~1,
+                  data = subset(df, Group == "Birds"),
+                  family = glmmTMB::beta_family())
+
+car::Anova(RRA_bio_mod, type = "2")
+
+
+res_RB <- simulateResiduals(RRA_bio_mod)
+
+plot(res_RB)
+
+RRA_count_mod <- glmmTMB::glmmTMB(MeanRRA ~ Count_log +
+                                  Predator,
+                                ziformula = ~1,
+                                data = subset(df, Group == "Birds"),
+                                family = glmmTMB::beta_family())
+
+car::Anova(RRA_count_mod, type = "2")
+
+
+res_RC <- simulateResiduals(RRA_count_mod)
+
+plot(res_RC)
+
+#5 fit the models FOO
+#bionimal regression
+#Also, predator fixed or random(?)
+
+FOO_bio_mod <- glmmTMB::glmmTMB(cbind(TotalPresence, N - TotalPresence) ~ Biomass_log +
+                    Predator,
+                  data = subset(df, Group == "Birds"),
+                                family = binomial())
+
+car::Anova(FOO_bio_mod, type = "2")
+
+res_FB <- simulateResiduals(FOO_bio_mod)
+
+plot(res_FB)
+
+FOO_count_mod <- glmmTMB::glmmTMB(cbind(TotalPresence, N - TotalPresence) ~ Count_log +
+                                  Predator,
+                                data = subset(df, Group == "Birds"),
+                                family = binomial())
+
+car::Anova(FOO_count_mod, type = "2")
+
+res_FC <- simulateResiduals(FOO_count_mod)
+
+plot(res_FC)
+
+#Model diagnostics
 
 
 
+#Predictions
 
+ggplot(subset(df, Group == "Birds"), aes(x = log(Count +0.01), y = FOO)) +
+  geom_point() +
+  facet_wrap(~Predator)
 
-
-
-
-
+#Lessons from plotting
+#1. Biomass obivously can't be unlogged
+#2. MeanRRA is a scale from 0-1. That means beta regression
+#3. Year and month effects are not relevant. We want to know if there
+#is a global pattern, not if months or years influence it.
+#Summary: use beta regeression with a log link
 
 
 
@@ -325,7 +670,7 @@ prey_rel <- prey_sum |>
   ) |>
   ungroup()
 
-#Calculate relative biomass
+#Calculate biomass
 weight_df <- read.csv("Insect_dryweight.csv", sep = ";")
 
 mean_biomass <- weight_df |> 
