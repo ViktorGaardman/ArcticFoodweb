@@ -122,6 +122,10 @@ files <- list.files(
   pattern = "^edgelist_.*_20.*_Fam_RRA\\.csv$"
 )
 
+read_edgelist <- function(file) {
+  read.csv(file, sep = ",")
+}
+
 edgelists <- files |>
   set_names(
     basename(files) |>
@@ -409,18 +413,24 @@ df_clean <- df_clean |>
 df_clean <- df_clean |> 
   mutate(
     across(
-      c("Month", "Year"), as.factor)
+      c("Month", "Year", "Predator", "Taxon"), as.factor)
     )
 
 
 #4 fit the models RRA
-#Ziformula to handle zeros and ones
+#We don't add Prey as a factor due to lack of data
+#We use ziformula to account for zeros - 
+#Zeros may be true but also a consequence of read thresholds.
+#Interactions and spline did not improve the models. If they did,
+#Those models are used instead.
 #compare AIC with normal model to see if log model is better
 
-ggplot(data = subset(df_clean, Group == "Birds"), aes(x = Biomass_log,
+ggplot(data = subset(df_clean, Predator == "Redpoll"), aes(x = Biomass_log,
                                                 y = MeanRRA)) +
   geom_point()
 
+bird_df <- subset(df_clean, Group == "Birds") |> 
+  droplevels()
 
 RRA_bio_mod <- glmmTMB::glmmTMB(MeanRRA ~ poly(Biomass_log, 2) +
                                 Month +
@@ -428,8 +438,23 @@ RRA_bio_mod <- glmmTMB::glmmTMB(MeanRRA ~ poly(Biomass_log, 2) +
                     Predator,
                     ziformula = ~1,
                     dispformula = ~Month,
-                  data = subset(df_clean, Group == "Birds"),
+                  data = bird_df,
                   family = glmmTMB::beta_family())
+
+
+RRA_bio_spline <- glmmTMB::glmmTMB(
+  MeanRRA ~ splines::ns(Biomass_log, df = 3) +
+    Month +
+    Year +
+    Predator,
+  ziformula = ~1,
+  dispformula = ~Month,
+  data = subset(df_clean, Group == "Birds"),
+  family = glmmTMB::beta_family()
+)
+
+AIC(RRA_bio_mod, RRA_bio_mod_pred)
+#No great difference- stick with the simpler quadratic model
 
 car::Anova(RRA_bio_mod, type = "2")
 #Differences between months and a non-linear relationship between 
@@ -445,69 +470,57 @@ plotResiduals(res_RB, subset(df_clean, Group == "Birds")$Month)
 plotResiduals(res_RB, subset(df_clean, Group == "Birds")$Year)
 
 #Predict
-#This version is not good. 
-#ggpredict could not handle marginal effects
-#emmeans is not good with non-linear predictions
-#what to do?? Ask claude and chatGTP
 
-bio_seq <- seq(
-  min(subset(df_clean, Group == "Birds")$Biomass_log),
-  max(subset(df_clean, Group == "Birds")$Biomass_log),
+library(marginaleffects)
+
+bio_values <- seq(
+  min(bird_df$Biomass_log, na.rm = TRUE),
+  max(bird_df$Biomass_log, na.rm = TRUE),
   length.out = 100
 )
 
-pred_df <- do.call(rbind,
-                   lapply(bio_seq, function(x) {
-                     
-                     tmp <- subset(df_clean, Group == "Birds")
-                     tmp$Biomass_log <- x
-                     
-                     data.frame(
-                       Biomass_log = x,
-                       Pred = mean(
-                         predict(
-                           RRA_bio_mod,
-                           newdata = tmp,
-                           type = "response"
-                         )
-                       )
-                     )
-                   })
+pred_RRA_bio <- avg_predictions(
+  RRA_bio_mod,
+  newdata = datagrid(
+    Biomass_log = bio_values,
+    grid_type = "counterfactual"
+  ),
+  by = "Biomass_log",
+  re.form = NA
 )
 
-pred_RRAbio <- ggplot(pred_df, aes(x = Biomass_log, y = Pred)) +
-  geom_point()
-  geom_ribbon(data = plot_pred,
-              aes(x = Temp, ymin = asymp.LCL, ymax = asymp.UCL),
-              alpha = 0.1) +
-  geom_jitter(data = df, aes(x = Temp, y = (Dead/20), color = Sex), alpha = 0.6,
-              width = 0.3) +
-  geom_line(data = plot_pred, aes(x = Temp, y = prob, color = Sex), linewidth = 1) +
-  
-  scale_color_manual(values = c("#009E73", "#E69F00")) +
-  scale_fill_manual(values = c("#009E73", "#E69F00")) +
-  scale_x_continuous(limits = c(2, 19), breaks = scales::pretty_breaks(n = 9)) +
+RRA_bio_plot <- ggplot(pred_RRA_bio, aes(x = Biomass_log, y = estimate)) +
+#  geom_point(
+#    data = subset(df_clean, Group == "Birds"),
+#    aes(x = Biomass_log,
+#        y = MeanRRA)
+#  ) +
+  geom_line(linewidth = 1.2) +
+  geom_ribbon(
+    aes(ymin = conf.low, ymax = conf.high),
+    alpha = 0.2
+  ) +
   theme_classic() +
-  ylab("Predicted proportion consumed") +
-  xlab("Temperature (°C)") +
-  theme(
-    axis.text = element_text(size = 12),
-    axis.title = element_text(size = 14)
+  labs(
+    x = "Log biomass",
+    y = "Predicted MeanRRA"
   )
 
 
 
-
+#Count mod
+#Basic mod best again
 RRA_count_mod <- glmmTMB::glmmTMB(MeanRRA ~ poly(Count_log, 2) + 
                                     Month +
                                     Year +
                                   Predator,
                                 ziformula = ~1,
                                 dispformula = ~Month,
-                                data = subset(df_clean, Group == "Birds"),
+                                data = bird_df,
                                 family = glmmTMB::beta_family())
 
 car::Anova(RRA_count_mod, type = "2")
+
 #Same results as for biomass!
 
 res_RC <- simulateResiduals(RRA_count_mod)
@@ -515,15 +528,51 @@ res_RC <- simulateResiduals(RRA_count_mod)
 plot(res_RC)
 testDispersion(res_RC)
 testUniformity(res_RC)
-plotResiduals(res_RC, subset(df_clean, Group == "Birds")$Predator)
-plotResiduals(res_RC, subset(df_clean, Group == "Birds")$Month)
-plotResiduals(res_RC, subset(df_clean, Group == "Birds")$Year)
+plotResiduals(res_RC, bird_df$Predator)
+plotResiduals(res_RC, bird_df$Month)
+plotResiduals(res_RC, bird_df$Year)
+
+
+count_values <- seq(
+  min(bird_df$Count_log, na.rm = TRUE),
+  max(bird_df$Count_log, na.rm = TRUE),
+  length.out = 100
+)
+
+pred_RRA_count <- avg_predictions(
+  RRA_count_mod,
+  newdata = datagrid(
+    Count_log = count_values,
+    grid_type = "counterfactual"
+  ),
+  by = "Count_log",
+  re.form = NA
+)
+
+RRA_count_plot <- ggplot(pred_RRA_count, aes(x = Count_log, y = estimate)) +
+  #  geom_point(
+  #    data = subset(df_clean, Group == "Birds"),
+  #    aes(x = Biomass_log,
+  #        y = MeanRRA)
+  #  ) +
+  geom_line(linewidth = 1.2) +
+  geom_ribbon(
+    aes(ymin = conf.low, ymax = conf.high),
+    alpha = 0.2
+  ) +
+  theme_classic() +
+  labs(
+    x = "Log abundance",
+    y = "Predicted MeanRRA"
+  )
+
 
 #5 fit the models FOO
-#bionimal regression
-#Also, predator fixed or random(?)
+#Betabinomial regression to handle additional variability
+#around the underlying probability
+#Poly still the best model
 
-ggplot(subset(df_clean, Group == "Birds"), aes(x = Biomass_log,
+ggplot(bird_df, aes(x = Biomass_log,
                                                y = FOO)) +
   geom_point()
 
@@ -532,11 +581,15 @@ FOO_bio_mod <- glmmTMB::glmmTMB(cbind(TotalPresence, N - TotalPresence) ~
                                   Month +
                                   Year +
                     Predator,
-                    dispformula = ~ Month + Year,
-                  data = subset(df_clean, Group == "Birds"),
-                                family = binomial())
+                    dispformula = ~ Month,
+                  data = bird_df,
+                                family = glmmTMB::betabinomial())
+
+AIC(FOO_bio_mod,FOO_bio_poly)
 
 car::Anova(FOO_bio_mod, type = "2")
+
+
 #Model still is not perfect...
 
 res_FB <- simulateResiduals(FOO_bio_mod)
@@ -544,55 +597,164 @@ res_FB <- simulateResiduals(FOO_bio_mod)
 plot(res_FB)
 testDispersion(res_FB)
 testUniformity(res_FB)
-plotResiduals(res_FB, subset(df_clean, Group == "Birds")$Predator)
-plotResiduals(res_FB, subset(df_clean, Group == "Birds")$Month)
-plotResiduals(res_FB, subset(df_clean, Group == "Birds")$Year)
+plotResiduals(res_FB, bird_df$Predator)
+plotResiduals(res_FB, bird_df$Month)
+plotResiduals(res_FB, bird_df$Year)
 
-ggplot(subset(df_clean, Group == "Birds"), aes(x = Count_log,
+pred_FOO_bio <- avg_predictions(
+  FOO_bio_mod,
+  newdata = datagrid(
+    Biomass_log = bio_values,
+    grid_type = "counterfactual"
+  ),
+  by = "Biomass_log",
+  re.form = NA
+)
+
+FOO_bio_plot <- ggplot(pred_FOO_bio, aes(x = Biomass_log, y = estimate)) +
+    geom_point(
+      data = bird_df,
+      aes(x = Biomass_log,
+          y = FOO),
+      alpha = 0.5
+    ) +
+  geom_line(linewidth = 1.2) +
+  geom_ribbon(
+    aes(ymin = conf.low, ymax = conf.high),
+    alpha = 0.2
+  ) +
+  theme_classic() +
+  labs(
+    x = "Log biomass",
+    y = "Predicted FOO"
+  )
+
+#Count mod
+#Here, a linear relationship was the best fit
+#No dispersion formula needed either
+
+ggplot(bird_df, aes(x = Count_log,
                                                y = FOO)) +
   geom_point()
 
 FOO_count_mod <- glmmTMB::glmmTMB(cbind(TotalPresence, N - TotalPresence) ~ 
-                                    poly(Count_log, 2) +
+                                    Count_log +
                                     Month + 
                                     Year +
                                   Predator,
-                                  dispformula = ~ Month,
-                                data = subset(df_clean, Group == "Birds"),
-                                family = binomial())
+                                data = bird_df,
+                                family = glmmTMB::betabinomial())
 
-car::Anova(FOO_count_mod, type = "2")
+AIC(FOO_count_mod, FOO_count_org)
+car::Anova(FOO_count_log, type = "2")
 
 res_FC <- simulateResiduals(FOO_count_mod)
 
 plot(res_FC)
 testDispersion(res_FC)
 testUniformity(res_FC)
-plotResiduals(res_FC, subset(df_clean, Group == "Birds")$Predator)
-plotResiduals(res_FC, subset(df_clean, Group == "Birds")$Month)
-plotResiduals(res_FC, subset(df_clean, Group == "Birds")$Year)
+plotResiduals(res_FC, bird_df$Predator)
+plotResiduals(res_FC, bird_df$Month)
+plotResiduals(res_FC, bird_df$Year)
+
+pred_FOO_count <- avg_predictions(
+  FOO_count_mod,
+  newdata = datagrid(
+    Count_log = count_values,
+    grid_type = "counterfactual"
+  ),
+  by = "Count_log",
+  re.form = NA
+)
+
+FOO_count_plot <- ggplot(pred_FOO_count, aes(x = Count_log, y = estimate)) +
+  geom_point(
+    data = bird_df,
+    aes(x = Count_log,
+        y = FOO),
+    alpha = 0.5
+  ) +
+  geom_line(linewidth = 1.2) +
+  geom_ribbon(
+    aes(ymin = conf.low, ymax = conf.high),
+    alpha = 0.2
+  ) +
+  theme_classic() +
+  labs(
+    x = "Log abundance",
+    y = "Predicted FOO"
+  )
+
+
+#Combine plots
+
+combined_preds <- (RRA_bio_plot | RRA_count_plot) /
+  (FOO_bio_plot | FOO_count_plot)
+
+ggsave(combined_preds, filename = "birdpredation_plots.png",
+       dpi = 300, height = 8, width = 10)
 
 
 
-#Model diagnostics
+#Add rank-abundance curves (?)
 
 
 
-#Predictions
 
-ggplot(subset(df, Group == "Birds"), aes(x = log(Count +0.01), y = FOO)) +
-  geom_point() +
-  facet_wrap(~Predator)
-
-#Lessons from plotting
-#1. Biomass obivously can't be unlogged
-#2. MeanRRA is a scale from 0-1. That means beta regression
-#3. Year and month effects are not relevant. We want to know if there
-#is a global pattern, not if months or years influence it.
-#Summary: use beta regeression with a log link
+#Add viswebs for birds (?)
 
 
+files_full_RRA <- list.files(
+  pattern = "^edgelist_20.*_Fam_RRA\\.csv$"
+)
 
+
+yearly_edgelists_RRA <- files_full_RRA |>
+  set_names(
+    basename(files_full_RRA) |>
+      gsub("\\.csv$", "", x = _) |>
+      gsub("^edgelist_", "", x = _) |>
+      tolower()
+  ) |>
+  map(\(f) read_edgelist(f)[, 2:6])
+
+yearly_bird_RRA<- function(edgelist,
+                                year,
+                                month) {
+  
+  #Convert to wide format datasets
+  matrix_birdRRA <- edgelist |> 
+    select(Predator, Prey, MeanRRA) |> 
+    filter(Predator %in% c("Wheatear", "Snow_bunting",
+                           "Lapland_bunting", "Ptarmigan", 
+                           "Redpoll")) |> 
+    pivot_wider(
+      names_from = "Predator",
+      values_from = "MeanRRA",
+      id_cols = "Prey",
+      values_fill = 0
+    )
+  
+  matrix_birdRRA <- matrix_birdRRA |> 
+    column_to_rownames("Prey") |> 
+    as.matrix()
+  
+}
+
+yearly_visdata_RRA <- purrr::imap(yearly_edgelists_RRA, function(edgelist, nm) {
+  
+  parts <- strsplit(nm, "_")[[1]]
+  
+  month <- tools::toTitleCase(parts[1])
+  year <- parts[2]
+  
+  yearly_bird_RRA(
+    edgelist,
+    year,
+    month
+  )
+  
+})
 
 
 
