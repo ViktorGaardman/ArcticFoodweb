@@ -32,7 +32,8 @@ df_25 <- read.csv("FoodwebSamples_2025.csv", sep = ";")|>
     Size.Gender %in% c("XL", "Large",
                        "Medium", "Small") ~ "Larvae",
     Size.Gender %in% c("Male", "male", "Female",
-                   "female", "Adult_female", "Adult_male") ~ "Adult")
+                   "female", "Adult_female", "Adult_male",
+                   "Unknown") ~ "Adult")
   )
 
 df_tot <- rbind(df_24, df_25)
@@ -84,7 +85,7 @@ testDispersion(res)
 
 # Create prediction dataset
 pred_data <- expand.grid(
-  doy = seq(150, 225, by = 1)
+  doy = seq(150, 250, by = 1)
 )
 
 
@@ -127,61 +128,66 @@ plot_predictions <- pred_data %>%
 
 #Calculate size proportions
 size_data <- df_tot %>%
-  filter(
-    Stage == "Larvae",
-    !is.na(Size.Gender)
-  ) %>%
-  group_by(doy) %>%
+  group_by(doy, year) %>%
   summarise(
     small = sum(Size.Gender %in% c("Small", "Medium", "medium")),
     large = sum(Size.Gender %in% c("Large", "XL")),
+    adult = sum(Size.Gender %in% c("female", "male", "Female",
+                                   "Male", "Adult_female", 
+                                   "Adult_male", "Unknown")),
     total = n(),
     .groups = "drop"
   ) %>%
   mutate(
     small = small / total,
-    large = large / total
+    large = large / total,
+    adult = adult / total
   ) |> 
   mutate(
-    sum = small + large
+    sum = small + large + adult
   )
 
 size_long <- size_data %>%
   pivot_longer(
-    cols = c(small, large),
+    cols = c(small, large, adult),
     names_to = "size_class",
     values_to = "proportion"
-  )
+  ) 
+
+size_long$year <- as.factor(size_long$year)
+
+#Offset doy 183 2024 to not overlap with 2025
+size_long$doy[size_long$year == 2024 & size_long$doy == 183] <- 182
 
 #Make a line for day 182 and day 212 (start and end of July)
-larvaldev_plot <- ggplot() +
+larvaldev_plot_year <- ggplot() +
   # Observed size-class proportions
   geom_col(
     data = size_long,
     aes(
       x = doy,
       y = proportion,
-      fill = size_class
+      fill = size_class,
+      alpha = year
     ),
-    width = 1,
-    alpha = 0.65
+    width = 1
   ) +
   geom_vline(
     xintercept = 153,
     linetype = "dashed",
-    colour = "#D55E00",
+    colour = "black",
     linewidth = 0.8
   ) +
   geom_vline(
     xintercept = 183,
     linetype = "dashed",
-    colour = "#D55E00",
+    colour = "black",
     linewidth = 0.8
   ) +
   geom_vline(
     xintercept = 213,
     linetype = "dashed",
-    colour = "#D55E00",
+    colour = "black",
     linewidth = 0.8
   ) +
   # Model confidence interval
@@ -207,16 +213,26 @@ larvaldev_plot <- ggplot() +
   ) +
   scale_y_continuous(
     limits = c(0, 1),
+    breaks = seq(0, 1, 0.25),
+    expand = c(0,0),
     name = "Proportion of larvae"
   ) +
   scale_fill_manual(
     values = c(
       small = "#E69F00",
-      large = "#009E73"
+      large = "#009E73",
+      adult = "#CC79A7"
     ),
-    breaks = c("small", "large"),
-    name = "Larval size class"
+    breaks = c("small", "large", "adult"),
+    name = "Development stage"
   ) +
+  scale_alpha_manual(
+    name = "Year",
+    values = c(
+      "2024" = 1,
+      "2025" = 0.5
+    )
+    ) +
   labs(
     x = "Day of year"
   ) +
@@ -229,7 +245,7 @@ larvaldev_plot <- ggplot() +
     legend.title = element_text(size = 12)
   )
 
-ggsave(larvaldev_plot, filename = "aquaticpred_devplot.png",
+ggsave(larvaldev_plot_year, filename = "aquaticpred_devplot_year.png",
        dpi = 300, width = 8, height = 5)
 
 #2. 
@@ -238,3 +254,143 @@ ggsave(larvaldev_plot, filename = "aquaticpred_devplot.png",
 #Will require re-cleaning of specifically the C.dolabratus data
 #We can work directly with the edgelists to figure this out
 #some type of chi-sqr test for the distribution of FOO or meanRRA
+
+matrix24 <- read_xlsx("mergedData_wide_ReadCounts_2024.xlsx")
+matrix25 <- read_xlsx("mergedData_wide_ReadCounts_2025.xlsx")
+
+matrix24 <- matrix24 |> 
+  select(-Kingdom)
+
+#combine
+long24 <- pivot_longer(matrix24,
+                       -c(Phylum:Assigned),
+                       names_to = "Sample",
+                       values_to = "Reads")
+
+long25 <- pivot_longer(matrix25,
+                       -c(Phylum:Assigned),
+                       names_to = "Sample",
+                       values_to = "Reads")
+
+combined_df <- bind_rows(long24, long25)
+
+
+#Remove the plants and worms for now
+combined_df <- combined_df |> 
+  filter(!Phylum %in% c("Streptophyta", "Annelida"))
+
+#Remove prey species that don't exist in Greenland
+combined_df <- combined_df |> 
+  filter(!Species %in% c("Hypera_diversipunctata", "Otiorhynchus_singularis",
+                         "Phyllobius_pyri", "Strophosoma_capitatum"))
+
+#Remove prey families that don't exist in Greenland
+combined_df <- combined_df %>%
+  filter(!Family %in% c("Blattidae", "Formicidae", "Elateridae", "Cantharidae",
+                        "Lasiocampidae", "Elmidae", "Xylophagidae", "Pentatomidae",
+                        "Rhagionidae", "Clubionidae", "Anyphaenidae",
+                        "Chaoboridae", "Clusiidae", "Dolomedidae", 
+                        "Ephemerellidae", "Gryllidae", "Leuctridae",
+                        "NA", "Nemouridae", "Ptychopteridae",
+                        "Salticidae", "Sarcophagidae"))
+
+#Keep only the beetle samples
+#1. Find beetle samples
+beetle_foodweb <- combined_df %>%
+  filter(Sample %in% df_tot$ID)
+
+beetle_foodweb <- beetle_foodweb |> 
+  left_join(
+    df_tot %>%
+      select(ID, Stage, Size.Gender),
+    by = c("Sample" = "ID")
+  )
+
+beetle_foodweb <- beetle_foodweb |> 
+  mutate(Size = case_when(
+    Size.Gender %in% c("Medium", "medium", "Small") ~ "Small",
+  Size.Gender %in% c("XL", "Large") ~ "Large",
+  Size.Gender %in% c("Male", "male", "Female",
+                     "female", "Adult_female", "Adult_male",
+                     "Unknown") ~ "Adult")
+)
+
+family_pa <- beetle_foodweb %>%
+  filter(!Family %in% "Dytiscidae") |> 
+  group_by(Sample, Size, Family) |> 
+  summarise(
+    Present = as.integer(sum(Reads, na.rm = TRUE) > 0),
+    .groups = "drop"
+  ) %>%
+  group_by(Family) |> 
+  filter(sum(Present, na.rm = TRUE) > 0) %>%
+  ungroup() |> 
+  group_by(Sample) |> 
+  filter(sum(Present, na.rm = TRUE) > 0) |> 
+  ungroup()
+
+#Compare size classes, also compare adult males-females if there is
+#enough data
+#First group prey by family level and samples by beetle Size
+#Then remove all interactions that are always 0 and self-reads
+dyt_samples <- beetle_foodweb %>%
+  filter(Family == "Dytiscidae", Reads > 0) %>%
+  pull(Sample) %>%
+  unique()
+
+beetle_foodweb <- beetle_foodweb %>%
+  filter(Sample %in% dyt_samples)
+
+family_foodweb <- beetle_foodweb %>%
+  group_by(Size, Family) %>%
+  summarise(
+    N_present = n_distinct(Sample[Reads > 0]),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    beetle_foodweb %>%
+      group_by(Size) %>%
+      summarise(
+        N_samples = n_distinct(Sample),
+        .groups = "drop"
+      ),
+    by = "Size"
+    ) %>%
+  mutate(
+    FOO = N_present / N_samples
+  )
+
+family_foodweb <- family_foodweb %>%
+  group_by(Family) |> 
+  filter(sum(FOO, na.rm = TRUE) > 0) %>%
+  ungroup() |> 
+  filter(!Family %in% "Dytiscidae")
+
+beetle_matrix_FOO <- family_foodweb %>%
+  select(Size, Family, FOO) %>%
+  pivot_wider(
+    id_cols = Size,
+    names_from = Family,
+    values_from = FOO,
+    values_fill = 0
+  )%>%
+  column_to_rownames("Size")
+  
+
+#Convert to matrix
+
+png(
+  "beetle_visweb.png",
+  width = 1200,
+  height = 500,
+  res = 300
+)
+
+visweb(
+  as.matrix(beetle_matrix_FOO),
+  box.col = "cornflowerblue",
+  square = "b",
+  labsize = 0.6
+)
+
+dev.off()
