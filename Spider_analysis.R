@@ -18,11 +18,13 @@ set.seed(123)
 df_24 <- read.csv("Foodweb_samples_2024.csv", sep = ";") |> 
   filter(Group == "Spiders") |> 
   select(ID, Size.Gender, Location, Date) |> 
-  mutate(Location = fct_recode(
-    factor(Location),
-                     "Plot_1" = "Spider_1",
-                    "Plot_2" = "Spider_2" 
-  ))
+  mutate(
+    Location = fct_collapse(
+      factor(Location),
+      Plot_1 = c("Spider_1", "Spider1"),
+      Plot_2 = c("Spider_2", "Spider2")
+    )
+  )
 
 
 df_25 <- read.csv("FoodwebSamples_2025.csv", sep = ";")|> 
@@ -203,11 +205,13 @@ spider_df <- spider_foodweb |>
             by = "Sample")
 
 #Group data by prey family
-spider_df <- spider_df |> 
-  select(Family, Sample, Reads, Location ,doy, year, Predator) |> 
-  group_by(Family, Sample) |> 
-  mutate(SumReads = sum(Reads, na.rm = TRUE)) |> 
-  select(-Reads)
+spider_df <- spider_df |>
+  select(Family, Sample, Reads, Location, doy, year, Predator) |>
+  group_by(Family, Sample, Location, doy, year, Predator) |>
+  summarise(
+    Reads = sum(Reads, na.rm = TRUE),
+    .groups = "drop"
+  )
 
 #Filter out all self-reads
 spider_df <- spider_df |> 
@@ -216,7 +220,7 @@ spider_df <- spider_df |>
 #Filter out all families with no reads across any samples
 spider_df <- spider_df |> 
   group_by(Family) |> 
-  filter(sum(SumReads, na.rm = TRUE) > 0) |> 
+  filter(sum(Reads, na.rm = TRUE) > 0) |> 
   ungroup()
 
 #look at prey families
@@ -225,7 +229,7 @@ levels(as.factor(spider_df$Family))
 #Check if some samples had no prey reads
 no_reads <- spider_df |>
   group_by(Sample) |>
-  summarise(TotalReads = sum(SumReads, na.rm = TRUE)) |>
+  summarise(TotalReads = sum(Reads, na.rm = TRUE)) |>
   filter(TotalReads == 0)
 
 #Filter those samples
@@ -235,7 +239,7 @@ spider_df_clean <- spider_df |>
 spider_df_clean <- spider_df_clean |> 
   group_by(Sample) |> 
   mutate(
-    RRA = SumReads / sum(SumReads)
+    RRA = Reads / sum(Reads)
   )
 
 test <- spider_df_clean |> 
@@ -246,7 +250,7 @@ test <- spider_df_clean |>
 family_grouping <- spider_df_clean %>%
   group_by(Predator, Family) %>%
   summarise(
-    N_present = n_distinct(Sample[SumReads > 0]),
+    N_present = n_distinct(Sample[Reads > 0]),
     MeanRRA = mean(RRA),
     .groups = "drop"
   ) %>%
@@ -291,6 +295,60 @@ visweb(as.matrix(visweb_mat_FOO),
 
 #3. Visualize diet composition across sites for wolfspiders
 
-spider_df_clean
+with(
+  spider_df_clean %>% distinct(Sample, Predator, Location),
+  table(Predator, Location)
+)
 
-#4. Run permanova to investigate if differences are significant
+spider_df_clean <-spider_df_clean |> 
+  mutate(
+    Location = fct_collapse(
+      factor(Location),
+      "Dry" = c("Plot_1", "Plot_5"),
+      "River" = "Plot_3",
+      "Wet" = c("Plot_2", "Plot_4")
+    )
+  )
+
+#Filter only Lycosidae and Araneidae
+perm_df <- spider_df_clean |> 
+  filter(Predator %in% c("Lycosidae", "Araneidae"))
+
+comm_matrix <- perm_df %>%
+  select(Sample, Family, RRA) %>%
+  pivot_wider(
+    id_cols = Sample,
+    names_from = Family,
+    values_from = RRA,
+    values_fill = 0
+  ) %>%
+  column_to_rownames("Sample")
+
+meta <- perm_df %>%
+  distinct(Sample, Predator, Location, doy, year)
+
+meta <- meta[match(rownames(comm_matrix), meta$Sample), ]
+
+#4. Run NMDS + permanova to investigate if differences are significant
+
+nmds <- metaMDS(comm_matrix,
+                distance = "jaccard",
+                k = 2)
+
+plot_df <- data.frame(
+  NMDS1 = nmds$points[,1],
+  NMDS2 = nmds$points[,2],
+  Predator = meta$Predator,
+  Location = meta$Location
+)
+
+ggplot(plot_df,
+       aes(NMDS1, NMDS2, colour = Location,
+           shape = Predator)) +
+  geom_point(size = 3)
+
+adonis2(
+  comm_matrix ~ Predator + Location,
+  data = meta,
+  method = "jaccard"
+)
