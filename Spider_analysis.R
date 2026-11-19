@@ -7,7 +7,6 @@ library(forcats)
 library(vegan)
 library(DHARMa)
 
-
 rm(list=ls())
 
 options(contrasts = c("contr.sum", "contr.poly"))
@@ -287,13 +286,75 @@ visweb_mat_RRA <- family_grouping |>
   )%>%
   column_to_rownames("Predator")
 
-visweb(as.matrix(visweb_mat_RRA),
-       labsize = 0.6)
+#Make sure the order of predators are the same
+pred_order <- c("Araneidae", 
+                "Lycosidae",
+                "Phalangiidae", "Philodromidae",
+                "Thomisidae")
+prey_order <- c("Araneidae", "Dictynidae", "Linyphiidae",
+                "Lycosidae",
+                "Phalangiidae", "Philodromidae",
+                "Thomisidae", "Chironomidae", 
+                "Culicidae", "Muscidae", "Scathophagidae",
+                 "Sciaridae", "Simuliidae", "Coccinellidae",
+                "Dytiscidae",
+                "Gyrinidae", "Geometridae")
+
+visweb_mat_FOO <- visweb_mat_FOO[pred_order, prey_order]
+visweb_mat_RRA <- visweb_mat_RRA[pred_order, prey_order]
+
+for(taxon in intersect(rownames(visweb_mat_FOO),
+                       colnames(visweb_mat_FOO))) {
+  visweb_mat_FOO[taxon, taxon] <- NA
+}
 
 visweb(as.matrix(visweb_mat_FOO),
-       labsize = 0.6)
+       labsize = 0.6,
+       type = "none",
+       NA.col = "firebrick")
 
-#3. Visualize diet composition across sites for wolfspiders
+for(taxon in intersect(rownames(visweb_mat_RRA),
+                       colnames(visweb_mat_RRA))) {
+  visweb_mat_RRA[taxon, taxon] <- NA
+}
+
+visweb(as.matrix(visweb_mat_RRA),
+       labsize = 0.6,
+       type = "none",
+       NA.col = "firebrick")
+
+png(
+  "spider_visweb_RRA.png",
+  width = 1200,
+  height = 500,
+  res = 300
+)
+
+visweb(as.matrix(visweb_mat_RRA),
+       labsize = 0.6,
+       type = "none",
+       NA.col = "firebrick")
+
+dev.off()
+
+png(
+  "spider_visweb_FOO.png",
+  width = 1200,
+  height = 500,
+  res = 300
+)
+
+visweb(as.matrix(visweb_mat_FOO),
+       labsize = 0.6,
+       type = "none",
+       NA.col = "firebrick")
+
+dev.off()
+
+#Remember to try and color self-boxes
+
+
+#3. Visualize diet composition across sites for Lycosidae and Aranidae
 
 with(
   spider_df_clean %>% distinct(Sample, Predator, Location),
@@ -302,7 +363,7 @@ with(
 
 spider_df_clean <-spider_df_clean |> 
   mutate(
-    Location = fct_collapse(
+    Habitat = fct_collapse(
       factor(Location),
       "Dry" = c("Plot_1", "Plot_5"),
       "River" = "Plot_3",
@@ -312,9 +373,37 @@ spider_df_clean <-spider_df_clean |>
 
 #Filter only Lycosidae and Araneidae
 perm_df <- spider_df_clean |> 
-  filter(Predator %in% c("Lycosidae", "Araneidae"))
+  filter(Predator %in% c("Lycosidae"))
 
-comm_matrix <- perm_df %>%
+#Remove all zero interactions from this dataset
+#Check if some samples had no prey reads
+no_reads <- perm_df |>
+  group_by(Family) |> 
+  summarise(TotalReads = sum(Reads, na.rm = TRUE)) |>
+  filter(TotalReads == 0)
+
+#Also remove families with only one/two appearances
+small_fam <- perm_df |>
+  filter(Reads > 0) |>
+  group_by(Family) |>
+  summarise(TotalPres = n_distinct(Sample)) |> 
+  filter(TotalPres < 4)
+
+#Filter those samples
+perm_df_clean <- perm_df |> 
+  filter(!Family %in% no_reads$Family) |> 
+  filter(!Family %in% small_fam$Family)
+
+#Remove any sampls with no more reads
+zero_samp <- perm_df_clean |> 
+  group_by(Sample) |> 
+  summarize(TotReads = sum(Reads)) |> 
+  filter(TotReads == 0)
+
+perm_df_clean <- perm_df_clean |> 
+  filter(!Sample %in% zero_samp$Sample)
+
+comm_matrix <- perm_df_clean %>%
   select(Sample, Family, RRA) %>%
   pivot_wider(
     id_cols = Sample,
@@ -324,8 +413,8 @@ comm_matrix <- perm_df %>%
   ) %>%
   column_to_rownames("Sample")
 
-meta <- perm_df %>%
-  distinct(Sample, Predator, Location, doy, year)
+meta <- perm_df_clean %>%
+  distinct(Sample, Habitat, Predator, Location, doy, year)
 
 meta <- meta[match(rownames(comm_matrix), meta$Sample), ]
 
@@ -333,22 +422,180 @@ meta <- meta[match(rownames(comm_matrix), meta$Sample), ]
 
 nmds <- metaMDS(comm_matrix,
                 distance = "jaccard",
-                k = 2)
+                k = 2, trymax = 100)
+
+nmds_bray <- metaMDS(comm_matrix,
+                distance = "bray",
+                k = 2, trymax = 100)
 
 plot_df <- data.frame(
-  NMDS1 = nmds$points[,1],
-  NMDS2 = nmds$points[,2],
-  Predator = meta$Predator,
-  Location = meta$Location
+  NMDS1 = nmds_bray$points[,1],
+  NMDS2 = nmds_bray$points[,2],
+  Location = meta$Habitat
 )
 
 ggplot(plot_df,
-       aes(NMDS1, NMDS2, colour = Location,
-           shape = Predator)) +
+       aes(NMDS1, NMDS2, colour = Location)) +
   geom_point(size = 3)
 
-adonis2(
-  comm_matrix ~ Predator + Location,
-  data = meta,
-  method = "jaccard"
+##Permanova with year as a random factor
+#permutations <- with(meta, how(nperm=999, blocks = Location))
+
+#Calculate distance matrix
+dist_matrix <- vegdist(comm_matrix, method = "bray")
+
+###Fit permanova model
+adonis2(dist_matrix ~ Habitat  + doy + year,
+        by = "margin",
+        data=meta)
+
+pairwise.adonis2(dist_matrix ~ Habitat, data=meta,
+                 permutations=999,  p.adjust.m="none")
+
+#Check assumption of homogeneity of multivariate dispersion
+anova(betadisper(dist_matrix, meta$Location))
+
+#Visualize as viswebs again
+
+visweb_Lyc <- spider_df_clean %>%
+  filter(Predator == "Lycosidae") |> 
+  group_by(Family, Habitat) %>%
+  summarise(
+    N_present = n_distinct(Sample[Reads > 0]),
+    MeanRRA = mean(RRA),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    spider_df_clean %>%
+      group_by(Habitat) %>%
+      summarise(
+        N_samples = n_distinct(Sample),
+        .groups = "drop"
+      ),
+    by = "Habitat"
+  ) %>%
+  mutate(
+    FOO = N_present / N_samples
+  ) 
+
+visweb_FOO_Lyc <- visweb_Lyc |> 
+  pivot_wider(
+    values_from = FOO,
+    names_from = Family,
+    values_fill = 0,
+    id_cols = Habitat
+  )%>%
+  column_to_rownames("Habitat")
+
+visweb_RRA_Lyc <- visweb_Lyc |> 
+  pivot_wider(
+    values_from = MeanRRA,
+    names_from = Family,
+    values_fill = 0,
+    id_cols = Habitat
+  )%>%
+  column_to_rownames("Habitat")
+
+png(
+  "lyc_visweb_FOO.png",
+  width = 800,
+  height = 500,
+  res = 300
 )
+
+visweb(as.matrix(visweb_FOO_Lyc),
+       labsize = 0.4,
+       type = "none")
+
+dev.off()
+
+png(
+  "lyc_visweb_RRA.png",
+  width = 800,
+  height = 500,
+  res = 300
+)
+
+visweb(as.matrix(visweb_RRA_Lyc),
+       labsize = 0.4,
+       type = "none")
+
+dev.off()
+
+visweb_ara <- spider_df_clean %>%
+  filter(Predator == "Araneidae") |> 
+  group_by(Family, Habitat) %>%
+  summarise(
+    N_present = n_distinct(Sample[Reads > 0]),
+    MeanRRA = mean(RRA),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    spider_df_clean %>%
+      group_by(Habitat) %>%
+      summarise(
+        N_samples = n_distinct(Sample),
+        .groups = "drop"
+      ),
+    by = "Habitat"
+  ) %>%
+  mutate(
+    FOO = N_present / N_samples
+  ) 
+
+visweb_FOO_ara <- visweb_ara |> 
+  pivot_wider(
+    values_from = FOO,
+    names_from = Family,
+    values_fill = 0,
+    id_cols = Habitat
+  )%>%
+  column_to_rownames("Habitat")
+
+visweb_RRA_ara <- visweb_ara |> 
+  pivot_wider(
+    values_from = MeanRRA,
+    names_from = Family,
+    values_fill = 0,
+    id_cols = Habitat
+  )%>%
+  column_to_rownames("Habitat")
+
+png(
+  "ara_visweb_FOO.png",
+  width = 800,
+  height = 500,
+  res = 300
+)
+
+visweb(as.matrix(visweb_FOO_ara),
+       labsize = 0.4,
+       type = "none")
+
+dev.off()
+
+png(
+  "ara_visweb_RRA.png",
+  width = 800,
+  height = 500,
+  res = 300
+)
+
+visweb(as.matrix(visweb_RRA_ara),
+       labsize = 0.4,
+       type = "none")
+
+dev.off()
+
+#Try dbRDA
+
+cap_mod <- capscale(
+  comm_matrix ~ Habitat + Predator + year,
+  data = meta,
+  distance = "jaccard"
+)
+
+anova(cap_mod)
+anova(cap_mod, by = "terms")
+
+plot(cap_mod)
