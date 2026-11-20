@@ -59,59 +59,126 @@ mean_biomass <- weight_df |>
 #TO SHOW MISSING LINKS
 #IT SEEMS SOME PITFALL 2025 DATA IS NOW AVAILABLE TOO
 
-files_RRA <- list.files(
-  pattern = "^edgelist_.*_20.*_Fam_RRA\\.csv$"
-)
+edge24_RRA <- read.csv("edgelist_2024_Fam_RRA.csv")[,2:6]
+edge25_RRA <- read.csv("edgelist_2025_Fam_RRA.csv")[,2:6]
+edge24_FOO <- read.csv("edgelist_2024_Fam.csv")[,2:6]
+edge25_FOO <- read.csv("edgelist_2025_Fam.csv")[,2:6]
 
-read_edgelist <- function(file) {
-  read.csv(file, sep = ",")
-}
-
-edgelists_RRA <- files_RRA |>
-  set_names(
-    basename(files_RRA) |>
-      gsub("\\.csv$", "", x = _) |>
-      gsub("^edgelist_", "", x = _) |>
-      tolower()
-  ) |>
-  map(\(f) read_edgelist(f)[, 2:6])
-
-visdata_RRA_monthly <- function(edgelist,
-                                year,
-                                month) {
-  
-  #Convert to wide format datasets
-  matrixRRA <- edgelist |> 
-    select(Predator, Prey, MeanRRA) |> 
-    pivot_wider(
-      names_from = "Predator",
-      values_from = "MeanRRA",
-      id_cols = "Prey",
-      values_fill = 0
-    )
-  
-  matrixRRA <- matrixRRA |> 
-    column_to_rownames("Prey") |> 
-    as.matrix()
-  
-}
-
-all_visdata_RRA <- purrr::imap(edgelists_RRA, function(edgelist, nm) {
-  
-  parts <- strsplit(nm, "_")[[1]]
-  
-  month <- tools::toTitleCase(parts[1])
-  year <- parts[2]
-  
-  visdata_RRA_monthly(
-    edgelist,
-    year,
-    month
+#combine datasets
+combined_RRA <- bind_rows(edge24_RRA, edge25_RRA) %>%
+  group_by(Predator, Prey) %>%
+  summarise(
+    SumRRA = sum(SumRRA, na.rm = TRUE),
+    N = sum(N, na.rm = TRUE),
+    .groups = "drop"
+  ) |> 
+  filter(Predator %in% c("Snow_bunting", "Lapland_bunting",
+                         "Wheatear", "Ptarmigan", "Redpoll")) |> 
+  mutate(
+    MeanRRA = SumRRA / N
   )
-  
-})
 
-visweb(t(all_visdata_RRA[[5]]))
+str(combined_RRA)
+
+#Get taxonomy of prey
+tax24 <- readxl::read_xlsx("mergedData_wide_ReadCounts_2024.xlsx") |> 
+  select(Order, Family)
+tax25 <- readxl::read_xlsx("mergedData_wide_ReadCounts_2025.xlsx") |> 
+  select(Order, Family)
+
+taxonomy <- rbind(tax24, tax25) |> 
+  distinct(Order, Family)
+
+taxonomy$Prey <- taxonomy$Family
+
+combined_RRA <- combined_RRA %>%
+  left_join(taxonomy, by = "Prey")
+
+prey_order <- combined_RRA %>%
+  distinct(Prey, Order) %>%
+  arrange(Order, Prey) %>%
+  pull(Prey)
+
+pred_order <- c("Lapland_bunting", "Snow_bunting",
+                "Wheatear", "Redpoll", "Ptarmigan")
+
+combined_RRA <- combined_RRA %>%
+  mutate(Prey = factor(Prey, levels = prey_order),
+         Predator = factor(Predator, levels = pred_order))
+
+combined_RRA <- combined_RRA %>%
+  arrange(Predator, Prey)
+range(combined_RRA$MeanRRA)
+RRA_plot <- ggplot(combined_RRA,
+       aes(x = factor(Prey, levels = prey_order),
+           y = Predator,
+           fill = MeanRRA)) +
+  geom_tile() +
+  coord_fixed() +
+  scale_fill_viridis_c() +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    panel.grid = element_blank(),
+    legend.title = element_blank(),
+    axis.title = element_blank()
+  )
+
+RRA_plot
+
+ggsave(RRA_plot, filename = "Bird_visweb_RRA.png",
+       dpi = 300, height = 6, width = 12)
+
+#combine datasets
+combined_FOO <- bind_rows(edge24_FOO, edge25_FOO) %>%
+  group_by(Predator, Prey) %>%
+  summarise(
+    Presence = sum(TotalPresence, na.rm = TRUE),
+    N = sum(N, na.rm = TRUE),
+    .groups = "drop"
+  ) |> 
+  filter(Predator %in% c("Snow_bunting", "Lapland_bunting",
+                         "Wheatear", "Ptarmigan", "Redpoll")) |> 
+  mutate(
+    FOO = Presence / N
+  )
+
+
+combined_FOO <- combined_FOO %>%
+  left_join(taxonomy, by = "Prey")
+
+prey_order <- combined_FOO %>%
+  distinct(Prey, Order) %>%
+  arrange(Order, Prey) %>%
+  pull(Prey)
+
+combined_FOO <- combined_FOO %>%
+  mutate(Prey = factor(Prey, levels = prey_order),
+         Predator = factor(Predator, levels = pred_order))
+
+combined_FOO <- combined_FOO |> 
+  arrange(Predator, Prey) |> 
+  filter(FOO > 0)
+
+FOO_plot <- ggplot(combined_FOO,
+                   aes(x = factor(Prey, levels = prey_order),
+                       y = Predator,
+                       fill = FOO)) +
+  geom_tile() +
+  coord_fixed() +
+  scale_fill_viridis_c() +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    panel.grid = element_blank(),
+    legend.title = element_blank(),
+    axis.title = element_blank()
+  )
+
+FOO_plot
+
+ggsave(FOO_plot, filename = "Bird_visweb_FOO.png",
+       dpi = 300, height = 6, width = 12)
 
 #RRA
 
